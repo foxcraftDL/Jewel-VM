@@ -4,7 +4,6 @@ import java.util.*;
 
 public class BFVM {
     
-    // Contexto de ejecución para máxima velocidad
     static final class Context {
         byte[] tape;
         int ptr = 0;
@@ -12,10 +11,8 @@ public class BFVM {
         Context(int size) { tape = new byte[size]; }
     }
 
-    // Interfaz de instrucción para que la JVM haga Inlining
     interface Op { void exec(Context ctx); }
 
-    // Clases de instrucciones optimizadas
     static final class Add implements Op {
         private final byte val;
         Add(short v) { this.val = (byte) v; }
@@ -24,10 +21,12 @@ public class BFVM {
 
     static final class Move implements Op {
         private final short val;
-        private final int mask;
-        Move(short v, int m) { this.val = v; this.mask = m; }
+        private final int size;
+        Move(short v, int s) { this.val = v; this.size = s; }
         public void exec(Context ctx) { 
-            ctx.ptr = (ctx.ptr + val) & mask; 
+            // Manejo de wrap-around del puntero (evita ArrayIndexOutOfBounds)
+            ctx.ptr = (ctx.ptr + val) % size;
+            if (ctx.ptr < 0) ctx.ptr += size;
             ctx.ip++; 
         }
     }
@@ -35,7 +34,8 @@ public class BFVM {
     static final class JZ implements Op {
         int target;
         public void exec(Context ctx) {
-            if (ctx.tape[ctx.ptr] == 0) ctx.ip = target;
+            // FIX v1.1.0: Comparación unsigned para evitar bucles infinitos
+            if ((ctx.tape[ctx.ptr] & 0xFF) == 0) ctx.ip = target;
             else ctx.ip++;
         }
     }
@@ -43,7 +43,8 @@ public class BFVM {
     static final class JNZ implements Op {
         int target;
         public void exec(Context ctx) {
-            if (ctx.tape[ctx.ptr] != 0) ctx.ip = target;
+            // FIX v1.1.0: Comparación unsigned
+            if ((ctx.tape[ctx.ptr] & 0xFF) != 0) ctx.ip = target;
             else ctx.ip++;
         }
     }
@@ -54,7 +55,7 @@ public class BFVM {
             return;
         }
 
-        int memorySize = 65536; // Por defecto 64KB
+        int memorySize = 65536; 
         for (int i = 1; i < args.length; i++) {
             if (args[i].equals("-ms") && i + 1 < args.length) {
                 memorySize = Integer.parseInt(args[i + 1]);
@@ -65,11 +66,6 @@ public class BFVM {
         List<Op> ops = new ArrayList<>();
         Map<Integer, Integer> byteToOpIdx = new HashMap<>();
 
-        // Máscara para el puntero (solo funciona si memorySize es potencia de 2)
-        // Si no es potencia de 2, usaremos el modulo tradicional en Move
-        int mask = ((memorySize & (memorySize - 1)) == 0) ? memorySize - 1 : -1;
-
-        // FASE 1: Decodificación
         int b = 0;
         while (b < bfc.length) {
             byteToOpIdx.put(b, ops.size());
@@ -77,7 +73,7 @@ public class BFVM {
             short arg = (short) (((bfc[b + 1] & 0xFF) << 8) | (bfc[b + 2] & 0xFF));
 
             switch (opCode) {
-                case 0x01: ops.add(new Move(arg, mask != -1 ? mask : memorySize)); break;
+                case 0x01: ops.add(new Move(arg, memorySize)); break;
                 case 0x02: ops.add(new Add(arg)); break;
                 case 0x03: ops.add(ctx -> { System.out.print((char)(ctx.tape[ctx.ptr] & 0xFF)); ctx.ip++; }); break;
                 case 0x04: ops.add(ctx -> { try { ctx.tape[ctx.ptr] = (byte)System.in.read(); } catch(Exception e){} ctx.ip++; }); break;
@@ -88,30 +84,28 @@ public class BFVM {
             b += 3;
         }
 
-        // FASE 2: Linkeo de saltos
-        b = 0;
         for (int i = 0; i < ops.size(); i++) {
             Op current = ops.get(i);
+            int bytePos = i * 3; // Reconstrucción de posición para el linkeo
             if (current instanceof JZ || current instanceof JNZ) {
-                int byteTarget = ((bfc[b + 1] & 0xFF) << 8) | (bfc[b + 2] & 0xFF);
+                int byteTarget = ((bfc[bytePos + 1] & 0xFF) << 8) | (bfc[bytePos + 2] & 0xFF);
                 int targetOpIdx = byteToOpIdx.get(byteTarget);
                 if (current instanceof JZ) ((JZ)current).target = targetOpIdx;
                 else ((JNZ)current).target = targetOpIdx;
             }
-            b += 3;
         }
 
         Op[] program = ops.toArray(new Op[0]);
         Context ctx = new Context(memorySize);
         int progLen = program.length;
 
-        // FASE 3: Ejecución
         long start = System.nanoTime();
         while (ctx.ip < progLen) {
             program[ctx.ip].exec(ctx);
         }
         long end = System.nanoTime();
 
-        System.out.printf("\n\n--- Tiempo: %.4f ms (Memoria: %d) ---\n", (end - start) / 1_000_000.0, memorySize);
+        System.out.printf("\n\n--- Jewel-VM v1.1.0 | Tiempo: %.4f ms ---\n", (end - start) / 1_000_000.0);
     }
 }
+
